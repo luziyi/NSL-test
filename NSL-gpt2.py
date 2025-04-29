@@ -5,7 +5,7 @@ import math
 torch.set_printoptions(8)
 
 def gelu(x):
-    """
+    r"""
         Task: Use the torch API to implement the approximate calculation formula of the `GELU`
         activation function. The formula is as follows (you need to paste it into the latex
         online conversion website)
@@ -15,7 +15,7 @@ def gelu(x):
         Input: Tensor
         Output: Tensor
     """
-    pass
+    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
 
 
 def softmax(x):
@@ -24,7 +24,7 @@ def softmax(x):
         Input: Tensor
         Output: Tensor
     """
-    pass
+    return torch.nn.functional.softmax(x, dim=-1)
 
 
 def layer_norm(x, g_b, eps:float = 1e-5):
@@ -37,7 +37,11 @@ def layer_norm(x, g_b, eps:float = 1e-5):
     """
     g, b = torch.Tensor(g_b['g']), torch.Tensor(g_b['b'])
     
-    pass
+    mean = x.mean(dim=-1, keepdim=True)
+    var = x.var(dim=-1, unbiased=False, keepdim=True)
+    normalized = (x - mean) / torch.sqrt(var + eps)
+    return g * normalized + b
+
 
 def linear(x, w_b):  # [m, in], [in, out], [out] -> [m, out]
     """
@@ -48,8 +52,8 @@ def linear(x, w_b):  # [m, in], [in, out], [out] -> [m, out]
         Output: Tensor
     """
     w, b = w_b['w'], w_b['b']
-    pass
-    
+    return torch.matmul(x, torch.Tensor(w)) + torch.Tensor(b)
+
 
 def ffn(x, mlp):  # [n_seq, n_embd] -> [n_seq, n_embd]
     """
@@ -61,7 +65,10 @@ def ffn(x, mlp):  # [n_seq, n_embd] -> [n_seq, n_embd]
         Output: Tensor
     """
     w_b1, w_b2 = mlp['c_fc'], mlp['c_proj']
-    pass
+    x = linear(x, w_b1)  # 第一个线性变换
+    x = gelu(x)         # GELU激活函数
+    x = linear(x, w_b2)  # 第二个线性变换
+    return x
 
 
 def attention(q, k, v, mask):  # [n_q, d_k], [n_k, d_k], [n_k, d_v], [n_q, n_k] -> [n_q, d_v]
@@ -77,7 +84,20 @@ def attention(q, k, v, mask):  # [n_q, d_k], [n_k, d_k], [n_k, d_v], [n_q, n_k] 
             mlp: dictionary that load from gpt2 weight. w_b1 and w_b2 are the params of two linear layer
         Output: Tensor
     """
-    pass
+    d_k = k.shape[-1]
+    # 计算注意力分数
+    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)  # [n_q, n_k]
+    
+    # 应用mask
+    if mask is not None:
+        scores = scores + mask
+    
+    # 应用softmax获得注意力权重
+    weights = softmax(scores)  # [n_q, n_k]
+    
+    # 加权求和得到输出
+    return torch.matmul(weights, v)  # [n_q, d_v]
+
 
 def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
     """
@@ -94,38 +114,21 @@ def mha(x, attn, n_head):  # [n_seq, n_embd] -> [n_seq, n_embd]
     x = linear(x, c_attn)  # [n_seq, n_embd] -> [n_seq, 3*n_embd]
     
     # Split into qkv
-    """
-        Task: Split the q,k,v matrix from the tensor x
-        Notes: [n_seq, 3*n_embd] -> 3 * [n_seq, n_embd]
-    """
-    qkv = None # need to modify
+    qkv = x.chunk(3, dim=-1)  # [n_seq, 3*n_embd] -> 3 * [n_seq, n_embd]
 
     # Split into heads
     qkv_heads = [qkv_part.chunk(n_head, dim=-1) for qkv_part in qkv]  # 3 * [n_seq, n_embd] -> 3 * n_head * [n_seq, n_embd/n_head]
     qkv_heads = list(zip(*qkv_heads))  # [3, n_head, n_seq, n_embd/n_head]
 
-    # Causal mask to hide future inputs from being attended to
-    """
-        Task: Construct mask matrix
-        Notes: 
-            | 0  -inf -inf ... -inf |
-            | 0    0  -inf ... -inf |
-            | 0    0    0  ... -inf |
-            |...  ...  ... ...  ... | 
-            | 0    0    0  ...   0  |
-        Mask is a tensor whose dimension is [n_seq, n_seq]
-    """
-    causal_mask = None # need to modify
+    # 构建因果mask
+    n_seq = x.shape[0]
+    causal_mask = torch.triu(torch.full((n_seq, n_seq), float('-inf')), diagonal=1)
 
     # Perform attention over each head
     out_heads = [attention(q, k, v, causal_mask) for q, k, v in qkv_heads]  # n_head * [n_seq, n_embd/n_head]
     
     # Merge heads
-    """
-        Task: merge multi-heads results
-        Notes: n_head * [n_seq, n_embd/n_head] --> [n_seq, n_embd]
-    """
-    x = None # need to modify
+    x = torch.cat(out_heads, dim=-1)  # [n_seq, n_embd]
     
     # Out projection
     x = linear(x, c_proj)  # [n_seq, n_embd] -> [n_seq, n_embd]
@@ -157,7 +160,10 @@ def gpt2(inputs, params, n_head):  # [n_seq] -> [n_seq, n_vocab]
 
     # projection to vocab
     x = layer_norm(x, ln_f)  # [n_seq, n_embd] -> [n_seq, n_embd]
-    return x @ wte.T  # [n_seq, n_embd] -> [n_seq, n_vocab]
+    
+    # 避免NumPy弃用警告，使用torch.matmul或显式转换
+    wte_tensor = torch.Tensor(wte)
+    return torch.matmul(x, wte_tensor.T)  # [n_seq, n_embd] -> [n_seq, n_vocab]
 
 
 def generate(inputs, params, n_head, n_tokens_to_generate):
